@@ -1,169 +1,64 @@
 namespace ts {
+    /// We do not have a full parser support to know when we should parse a regex or not
+    /// If we consider every slash token to be a regex, we could be missing cases like "1/2/3", where
+    /// we have a series of divide operator. this list allows us to be more accurate by ruling out
+    /// locations where a regexp cannot exist.
+    const noRegexTable: true[] = ts.arrayToNumericMap<SyntaxKind, true>([
+        SyntaxKind.Identifier,
+        SyntaxKind.StringLiteral,
+        SyntaxKind.NumericLiteral,
+        SyntaxKind.RegularExpressionLiteral,
+        SyntaxKind.ThisKeyword,
+        SyntaxKind.PlusPlusToken,
+        SyntaxKind.MinusMinusToken,
+        SyntaxKind.CloseParenToken,
+        SyntaxKind.CloseBracketToken,
+        SyntaxKind.CloseBraceToken,
+        SyntaxKind.TrueKeyword,
+        SyntaxKind.FalseKeyword,
+    ], x => x, () => true);
+
     /// Classifier
     export function createClassifier(): Classifier {
         const scanner = createScanner(ScriptTarget.Latest, /*skipTrivia*/ false);
 
-        /// We do not have a full parser support to know when we should parse a regex or not
-        /// If we consider every slash token to be a regex, we could be missing cases like "1/2/3", where
-        /// we have a series of divide operator. this list allows us to be more accurate by ruling out
-        /// locations where a regexp cannot exist.
-        const noRegexTable: boolean[] = [];
-        noRegexTable[SyntaxKind.Identifier] = true;
-        noRegexTable[SyntaxKind.StringLiteral] = true;
-        noRegexTable[SyntaxKind.NumericLiteral] = true;
-        noRegexTable[SyntaxKind.RegularExpressionLiteral] = true;
-        noRegexTable[SyntaxKind.ThisKeyword] = true;
-        noRegexTable[SyntaxKind.PlusPlusToken] = true;
-        noRegexTable[SyntaxKind.MinusMinusToken] = true;
-        noRegexTable[SyntaxKind.CloseParenToken] = true;
-        noRegexTable[SyntaxKind.CloseBracketToken] = true;
-        noRegexTable[SyntaxKind.CloseBraceToken] = true;
-        noRegexTable[SyntaxKind.TrueKeyword] = true;
-        noRegexTable[SyntaxKind.FalseKeyword] = true;
-
-        // Just a stack of TemplateHeads and OpenCurlyBraces, used to perform rudimentary (inexact)
-        // classification on template strings. Because of the context free nature of templates,
-        // the only precise way to classify a template portion would be by propagating the stack across
-        // lines, just as we do with the end-of-line state. However, this is a burden for implementers,
-        // and the behavior is entirely subsumed by the syntactic classifier anyway, so we instead
-        // flatten any nesting when the template stack is non-empty and encode it in the end-of-line state.
-        // Situations in which this fails are
-        //  1) When template strings are nested across different lines:
-        //          `hello ${ `world
-        //          ` }`
-        //
-        //     Where on the second line, you will get the closing of a template,
-        //     a closing curly, and a new template.
-        //
-        //  2) When substitution expressions have curly braces and the curly brace falls on the next line:
-        //          `hello ${ () => {
-        //          return "world" } } `
-        //
-        //     Where on the second line, you will get the 'return' keyword,
-        //     a string literal, and a template end consisting of '} } `'.
-        const templateStack: SyntaxKind[] = [];
-
-        /** Returns true if 'keyword2' can legally follow 'keyword1' in any language construct. */
-        function canFollow(keyword1: SyntaxKind, keyword2: SyntaxKind) {
-            if (isAccessibilityModifier(keyword1)) {
-                if (keyword2 === SyntaxKind.GetKeyword ||
-                    keyword2 === SyntaxKind.SetKeyword ||
-                    keyword2 === SyntaxKind.ConstructorKeyword ||
-                    keyword2 === SyntaxKind.StaticKeyword) {
-
-                    // Allow things like "public get", "public constructor" and "public static".
-                    // These are all legal.
-                    return true;
-                }
-
-                // Any other keyword following "public" is actually an identifier an not a real
-                // keyword.
-                return false;
-            }
-
-            // Assume any other keyword combination is legal.  This can be refined in the future
-            // if there are more cases we want the classifier to be better at.
-            return true;
-        }
-
-        function convertClassifications(classifications: Classifications, text: string): ClassificationResult {
-            const entries: ClassificationInfo[] = [];
-            const dense = classifications.spans;
-            let lastEnd = 0;
-
-            for (let i = 0; i < dense.length; i += 3) {
-                const start = dense[i];
-                const length = dense[i + 1];
-                const type = <ClassificationType>dense[i + 2];
-
-                // Make a whitespace entry between the last item and this one.
-                if (lastEnd >= 0) {
-                    const whitespaceLength = start - lastEnd;
-                    if (whitespaceLength > 0) {
-                        entries.push({ length: whitespaceLength, classification: TokenClass.Whitespace });
-                    }
-                }
-
-                entries.push({ length, classification: convertClassification(type) });
-                lastEnd = start + length;
-            }
-
-            const whitespaceLength = text.length - lastEnd;
-            if (whitespaceLength > 0) {
-                entries.push({ length: whitespaceLength, classification: TokenClass.Whitespace });
-            }
-
-            return { entries, finalLexState: classifications.endOfLineState };
-        }
-
-        function convertClassification(type: ClassificationType): TokenClass {
-            switch (type) {
-                case ClassificationType.comment: return TokenClass.Comment;
-                case ClassificationType.keyword: return TokenClass.Keyword;
-                case ClassificationType.numericLiteral: return TokenClass.NumberLiteral;
-                case ClassificationType.operator: return TokenClass.Operator;
-                case ClassificationType.stringLiteral: return TokenClass.StringLiteral;
-                case ClassificationType.whiteSpace: return TokenClass.Whitespace;
-                case ClassificationType.punctuation: return TokenClass.Punctuation;
-                case ClassificationType.identifier:
-                case ClassificationType.className:
-                case ClassificationType.enumName:
-                case ClassificationType.interfaceName:
-                case ClassificationType.moduleName:
-                case ClassificationType.typeParameterName:
-                case ClassificationType.typeAliasName:
-                case ClassificationType.text:
-                case ClassificationType.parameterName:
-                default:
-                    return TokenClass.Identifier;
-            }
-        }
-
         function getClassificationsForLine(text: string, lexState: EndOfLineState, syntacticClassifierAbsent: boolean): ClassificationResult {
-            return convertClassifications(getEncodedLexicalClassifications(text, lexState, syntacticClassifierAbsent), text);
+            return convertClassificationsToResult(getEncodedLexicalClassifications(text, lexState, syntacticClassifierAbsent), text);
         }
 
         // If there is a syntactic classifier ('syntacticClassifierAbsent' is false),
         // we will be more conservative in order to avoid conflicting with the syntactic classifier.
         function getEncodedLexicalClassifications(text: string, lexState: EndOfLineState, syntacticClassifierAbsent: boolean): Classifications {
-            let offset = 0;
             let token = SyntaxKind.Unknown;
             let lastNonTriviaToken = SyntaxKind.Unknown;
 
-            // Empty out the template stack for reuse.
-            while (templateStack.length > 0) {
-                templateStack.pop();
-            }
-
-            // If we're in a string literal, then prepend: "\
-            // (and a newline).  That way when we lex we'll think we're still in a string literal.
+            // Just a stack of TemplateHeads and OpenCurlyBraces, used to perform rudimentary (inexact)
+            // classification on template strings. Because of the context free nature of templates,
+            // the only precise way to classify a template portion would be by propagating the stack across
+            // lines, just as we do with the end-of-line state. However, this is a burden for implementers,
+            // and the behavior is entirely subsumed by the syntactic classifier anyway, so we instead
+            // flatten any nesting when the template stack is non-empty and encode it in the end-of-line state.
+            // Situations in which this fails are
+            //  1) When template strings are nested across different lines:
+            //          `hello ${ `world
+            //          ` }`
             //
-            // If we're in a multiline comment, then prepend: /*
-            // (and a newline).  That way when we lex we'll think we're still in a multiline comment.
-            switch (lexState) {
-                case EndOfLineState.InDoubleQuoteStringLiteral:
-                    text = "\"\\\n" + text;
-                    offset = 3;
-                    break;
-                case EndOfLineState.InSingleQuoteStringLiteral:
-                    text = "'\\\n" + text;
-                    offset = 3;
-                    break;
-                case EndOfLineState.InMultiLineCommentTrivia:
-                    text = "/*\n" + text;
-                    offset = 3;
-                    break;
-                case EndOfLineState.InTemplateHeadOrNoSubstitutionTemplate:
-                    text = "`\n" + text;
-                    offset = 2;
-                    break;
-                case EndOfLineState.InTemplateMiddleOrTail:
-                    text = "}\n" + text;
-                    offset = 2;
-                    // falls through
-                case EndOfLineState.InTemplateSubstitutionPosition:
-                    templateStack.push(SyntaxKind.TemplateHead);
-                    break;
+            //     Where on the second line, you will get the closing of a template,
+            //     a closing curly, and a new template.
+            //
+            //  2) When substitution expressions have curly braces and the curly brace falls on the next line:
+            //          `hello ${ () => {
+            //          return "world" } } `
+            //
+            //     Where on the second line, you will get the 'return' keyword,
+            //     a string literal, and a template end consisting of '} } `'.
+            const templateStack: SyntaxKind[] = [];
+
+            const { prefix, pushTemplate } = getPrefixFromLexState(lexState);
+            text += prefix;
+            const offset = prefix.length;
+            if (pushTemplate) {
+                templateStack.push(SyntaxKind.TemplateHead);
             }
 
             scanner.setText(text);
@@ -358,112 +253,209 @@ namespace ts {
             }
         }
 
-        function isBinaryExpressionOperatorToken(token: SyntaxKind): boolean {
-            switch (token) {
-                case SyntaxKind.AsteriskToken:
-                case SyntaxKind.SlashToken:
-                case SyntaxKind.PercentToken:
-                case SyntaxKind.PlusToken:
-                case SyntaxKind.MinusToken:
-                case SyntaxKind.LessThanLessThanToken:
-                case SyntaxKind.GreaterThanGreaterThanToken:
-                case SyntaxKind.GreaterThanGreaterThanGreaterThanToken:
-                case SyntaxKind.LessThanToken:
-                case SyntaxKind.GreaterThanToken:
-                case SyntaxKind.LessThanEqualsToken:
-                case SyntaxKind.GreaterThanEqualsToken:
-                case SyntaxKind.InstanceOfKeyword:
-                case SyntaxKind.InKeyword:
-                case SyntaxKind.AsKeyword:
-                case SyntaxKind.EqualsEqualsToken:
-                case SyntaxKind.ExclamationEqualsToken:
-                case SyntaxKind.EqualsEqualsEqualsToken:
-                case SyntaxKind.ExclamationEqualsEqualsToken:
-                case SyntaxKind.AmpersandToken:
-                case SyntaxKind.CaretToken:
-                case SyntaxKind.BarToken:
-                case SyntaxKind.AmpersandAmpersandToken:
-                case SyntaxKind.BarBarToken:
-                case SyntaxKind.BarEqualsToken:
-                case SyntaxKind.AmpersandEqualsToken:
-                case SyntaxKind.CaretEqualsToken:
-                case SyntaxKind.LessThanLessThanEqualsToken:
-                case SyntaxKind.GreaterThanGreaterThanEqualsToken:
-                case SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken:
-                case SyntaxKind.PlusEqualsToken:
-                case SyntaxKind.MinusEqualsToken:
-                case SyntaxKind.AsteriskEqualsToken:
-                case SyntaxKind.SlashEqualsToken:
-                case SyntaxKind.PercentEqualsToken:
-                case SyntaxKind.EqualsToken:
-                case SyntaxKind.CommaToken:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
-        function isPrefixUnaryExpressionOperatorToken(token: SyntaxKind): boolean {
-            switch (token) {
-                case SyntaxKind.PlusToken:
-                case SyntaxKind.MinusToken:
-                case SyntaxKind.TildeToken:
-                case SyntaxKind.ExclamationToken:
-                case SyntaxKind.PlusPlusToken:
-                case SyntaxKind.MinusMinusToken:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
-        function isKeyword(token: SyntaxKind): boolean {
-            return token >= SyntaxKind.FirstKeyword && token <= SyntaxKind.LastKeyword;
-        }
-
-        function classFromKind(token: SyntaxKind): ClassificationType {
-            if (isKeyword(token)) {
-                return ClassificationType.keyword;
-            }
-            else if (isBinaryExpressionOperatorToken(token) || isPrefixUnaryExpressionOperatorToken(token)) {
-                return ClassificationType.operator;
-            }
-            else if (token >= SyntaxKind.FirstPunctuation && token <= SyntaxKind.LastPunctuation) {
-                return ClassificationType.punctuation;
-            }
-
-            switch (token) {
-                case SyntaxKind.NumericLiteral:
-                    return ClassificationType.numericLiteral;
-                case SyntaxKind.StringLiteral:
-                    return ClassificationType.stringLiteral;
-                case SyntaxKind.RegularExpressionLiteral:
-                    return ClassificationType.regularExpressionLiteral;
-                case SyntaxKind.ConflictMarkerTrivia:
-                case SyntaxKind.MultiLineCommentTrivia:
-                case SyntaxKind.SingleLineCommentTrivia:
-                    return ClassificationType.comment;
-                case SyntaxKind.WhitespaceTrivia:
-                case SyntaxKind.NewLineTrivia:
-                    return ClassificationType.whiteSpace;
-                case SyntaxKind.Identifier:
-                default:
-                    if (isTemplateLiteralKind(token)) {
-                        return ClassificationType.stringLiteral;
-                    }
-                    return ClassificationType.identifier;
-            }
-        }
-
         return {
             getClassificationsForLine,
             getEncodedLexicalClassifications
         };
     }
 
+    function convertClassificationsToResult(classifications: Classifications, text: string): ClassificationResult {
+        const entries: ClassificationInfo[] = [];
+        const dense = classifications.spans;
+        let lastEnd = 0;
+
+        for (let i = 0; i < dense.length; i += 3) {
+            const start = dense[i];
+            const length = dense[i + 1];
+            const type = <ClassificationType>dense[i + 2];
+
+            // Make a whitespace entry between the last item and this one.
+            if (lastEnd >= 0) {
+                const whitespaceLength = start - lastEnd;
+                if (whitespaceLength > 0) {
+                    entries.push({ length: whitespaceLength, classification: TokenClass.Whitespace });
+                }
+            }
+
+            entries.push({ length, classification: convertClassification(type) });
+            lastEnd = start + length;
+        }
+
+        const whitespaceLength = text.length - lastEnd;
+        if (whitespaceLength > 0) {
+            entries.push({ length: whitespaceLength, classification: TokenClass.Whitespace });
+        }
+
+        return { entries, finalLexState: classifications.endOfLineState };
+    }
+
+    function convertClassification(type: ClassificationType): TokenClass {
+        switch (type) {
+            case ClassificationType.comment: return TokenClass.Comment;
+            case ClassificationType.keyword: return TokenClass.Keyword;
+            case ClassificationType.numericLiteral: return TokenClass.NumberLiteral;
+            case ClassificationType.operator: return TokenClass.Operator;
+            case ClassificationType.stringLiteral: return TokenClass.StringLiteral;
+            case ClassificationType.whiteSpace: return TokenClass.Whitespace;
+            case ClassificationType.punctuation: return TokenClass.Punctuation;
+            case ClassificationType.identifier:
+            case ClassificationType.className:
+            case ClassificationType.enumName:
+            case ClassificationType.interfaceName:
+            case ClassificationType.moduleName:
+            case ClassificationType.typeParameterName:
+            case ClassificationType.typeAliasName:
+            case ClassificationType.text:
+            case ClassificationType.parameterName:
+                return TokenClass.Identifier;
+        }
+    }
+
+    /** Returns true if 'keyword2' can legally follow 'keyword1' in any language construct. */
+    function canFollow(keyword1: SyntaxKind, keyword2: SyntaxKind) {
+        if (isAccessibilityModifier(keyword1)) {
+            if (keyword2 === SyntaxKind.GetKeyword ||
+                keyword2 === SyntaxKind.SetKeyword ||
+                keyword2 === SyntaxKind.ConstructorKeyword ||
+                keyword2 === SyntaxKind.StaticKeyword) {
+
+                // Allow things like "public get", "public constructor" and "public static".
+                // These are all legal.
+                return true;
+            }
+
+            // Any other keyword following "public" is actually an identifier an not a real
+            // keyword.
+            return false;
+        }
+
+        // Assume any other keyword combination is legal.  This can be refined in the future
+        // if there are more cases we want the classifier to be better at.
+        return true;
+    }
+
+    function getPrefixFromLexState(lexState: EndOfLineState): { prefix: string, pushTemplate?: true } {
+        // If we're in a string literal, then prepend: "\
+        // (and a newline).  That way when we lex we'll think we're still in a string literal.
+        //
+        // If we're in a multiline comment, then prepend: /*
+        // (and a newline).  That way when we lex we'll think we're still in a multiline comment.
+        switch (lexState) {
+            case EndOfLineState.InDoubleQuoteStringLiteral:
+                return { prefix: "\"\\\n" };
+            case EndOfLineState.InSingleQuoteStringLiteral:
+                return { prefix: "'\\\n" };
+            case EndOfLineState.InMultiLineCommentTrivia:
+                return { prefix: "/*\n" };
+            case EndOfLineState.InTemplateHeadOrNoSubstitutionTemplate:
+                return { prefix: "`\n" };
+            case EndOfLineState.InTemplateMiddleOrTail:
+                return { prefix: "}\n", pushTemplate: true };
+            case EndOfLineState.InTemplateSubstitutionPosition:
+                return { prefix: "", pushTemplate: true };
+            case EndOfLineState.None:
+                return { prefix: "" };
+            default:
+                throw Debug.assertNever(lexState);
+        }
+    }
+
+    function isBinaryExpressionOperatorToken(token: SyntaxKind): boolean {
+        switch (token) {
+            case SyntaxKind.AsteriskToken:
+            case SyntaxKind.SlashToken:
+            case SyntaxKind.PercentToken:
+            case SyntaxKind.PlusToken:
+            case SyntaxKind.MinusToken:
+            case SyntaxKind.LessThanLessThanToken:
+            case SyntaxKind.GreaterThanGreaterThanToken:
+            case SyntaxKind.GreaterThanGreaterThanGreaterThanToken:
+            case SyntaxKind.LessThanToken:
+            case SyntaxKind.GreaterThanToken:
+            case SyntaxKind.LessThanEqualsToken:
+            case SyntaxKind.GreaterThanEqualsToken:
+            case SyntaxKind.InstanceOfKeyword:
+            case SyntaxKind.InKeyword:
+            case SyntaxKind.AsKeyword:
+            case SyntaxKind.EqualsEqualsToken:
+            case SyntaxKind.ExclamationEqualsToken:
+            case SyntaxKind.EqualsEqualsEqualsToken:
+            case SyntaxKind.ExclamationEqualsEqualsToken:
+            case SyntaxKind.AmpersandToken:
+            case SyntaxKind.CaretToken:
+            case SyntaxKind.BarToken:
+            case SyntaxKind.AmpersandAmpersandToken:
+            case SyntaxKind.BarBarToken:
+            case SyntaxKind.BarEqualsToken:
+            case SyntaxKind.AmpersandEqualsToken:
+            case SyntaxKind.CaretEqualsToken:
+            case SyntaxKind.LessThanLessThanEqualsToken:
+            case SyntaxKind.GreaterThanGreaterThanEqualsToken:
+            case SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken:
+            case SyntaxKind.PlusEqualsToken:
+            case SyntaxKind.MinusEqualsToken:
+            case SyntaxKind.AsteriskEqualsToken:
+            case SyntaxKind.SlashEqualsToken:
+            case SyntaxKind.PercentEqualsToken:
+            case SyntaxKind.EqualsToken:
+            case SyntaxKind.CommaToken:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    function isPrefixUnaryExpressionOperatorToken(token: SyntaxKind): boolean {
+        switch (token) {
+            case SyntaxKind.PlusToken:
+            case SyntaxKind.MinusToken:
+            case SyntaxKind.TildeToken:
+            case SyntaxKind.ExclamationToken:
+            case SyntaxKind.PlusPlusToken:
+            case SyntaxKind.MinusMinusToken:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    function classFromKind(token: SyntaxKind): ClassificationType {
+        if (isKeyword(token)) {
+            return ClassificationType.keyword;
+        }
+        else if (isBinaryExpressionOperatorToken(token) || isPrefixUnaryExpressionOperatorToken(token)) {
+            return ClassificationType.operator;
+        }
+        else if (token >= SyntaxKind.FirstPunctuation && token <= SyntaxKind.LastPunctuation) {
+            return ClassificationType.punctuation;
+        }
+
+        switch (token) {
+            case SyntaxKind.NumericLiteral:
+                return ClassificationType.numericLiteral;
+            case SyntaxKind.StringLiteral:
+                return ClassificationType.stringLiteral;
+            case SyntaxKind.RegularExpressionLiteral:
+                return ClassificationType.regularExpressionLiteral;
+            case SyntaxKind.ConflictMarkerTrivia:
+            case SyntaxKind.MultiLineCommentTrivia:
+            case SyntaxKind.SingleLineCommentTrivia:
+                return ClassificationType.comment;
+            case SyntaxKind.WhitespaceTrivia:
+            case SyntaxKind.NewLineTrivia:
+                return ClassificationType.whiteSpace;
+            case SyntaxKind.Identifier:
+            default:
+                if (isTemplateLiteralKind(token)) {
+                    return ClassificationType.stringLiteral;
+                }
+                return ClassificationType.identifier;
+        }
+    }
+
     /* @internal */
     export function getSemanticClassifications(typeChecker: TypeChecker, cancellationToken: CancellationToken, sourceFile: SourceFile, classifiableNames: UnderscoreEscapedMap<true>, span: TextSpan): ClassifiedSpan[] {
-        return convertClassifications(getEncodedSemanticClassifications(typeChecker, cancellationToken, sourceFile, classifiableNames, span));
+        return convertClassificationsToSpans(getEncodedSemanticClassifications(typeChecker, cancellationToken, sourceFile, classifiableNames, span));
     }
 
     function checkForClassificationCancellation(cancellationToken: CancellationToken, kind: SyntaxKind) {
@@ -583,7 +575,7 @@ namespace ts {
         }
     }
 
-    function convertClassifications(classifications: Classifications): ClassifiedSpan[] {
+    function convertClassificationsToSpans(classifications: Classifications): ClassifiedSpan[] { //name
         Debug.assert(classifications.spans.length % 3 === 0);
         const dense = classifications.spans;
         const result: ClassifiedSpan[] = [];
@@ -599,7 +591,7 @@ namespace ts {
 
     /* @internal */
     export function getSyntacticClassifications(cancellationToken: CancellationToken, sourceFile: SourceFile, span: TextSpan): ClassifiedSpan[] {
-        return convertClassifications(getEncodedSyntacticClassifications(cancellationToken, sourceFile, span));
+        return convertClassificationsToSpans(getEncodedSyntacticClassifications(cancellationToken, sourceFile, span));
     }
 
     /* @internal */
